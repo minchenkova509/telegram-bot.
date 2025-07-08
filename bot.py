@@ -1,74 +1,35 @@
-import json
-import logging
 import os
-
-from aiogram import Bot, Dispatcher, F
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Message, BufferedInputFile
-from aiogram.utils.markdown import hbold
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram import Router
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiohttp import web
 
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+API_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{os.getenv('WEBHOOK_BASE')}{WEBHOOK_PATH}"
 
-# Загрузка переменных из окружения
-API_TOKEN = os.getenv("API_TOKEN")
+logging.basicConfig(level=logging.INFO)
 
-# Подключение к Google Sheets
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-GOOGLE_CREDENTIALS_JSON = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
-
-CREDS = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, SCOPE)
-client = gspread.authorize(CREDS)
-sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1jDxPfl10qTiKrHW9mdvbY9voinMV872IYrs3iHK56Gg/edit").sheet1
-
-# FSM для обработки состояний
-class UploadStates(StatesGroup):
-    waiting_for_request_number = State()
-    waiting_for_document = State()
-
-# Инициализация
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-router = Router()
-dp.include_router(router)
 
-# Словарь для хранения активных заявок по пользователям
-active_requests = {}
+@dp.message()
+async def handle_message(message: types.Message):
+    await message.answer("Бот работает! Сообщение получено.")
 
-@router.message(F.text == "/start")
-async def start_handler(message: Message):
-    await message.answer("Привет! Напиши номер заявки, чтобы отправить документы.")
-    await UploadStates.waiting_for_request_number.set()
+async def on_startup(app: web.Application):
+    await bot.set_webhook(WEBHOOK_URL)
 
-@router.message(UploadStates.waiting_for_request_number)
-async def handle_request_number(message: Message, state: FSMContext):
-    request_number = message.text.strip()
-    active_requests[message.from_user.id] = request_number
-    await message.answer(f"Номер заявки: {hbold(request_number)}.\nТеперь пришли документ.")
-    await state.set_state(UploadStates.waiting_for_document)
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook()
 
-@router.message(UploadStates.waiting_for_document)
-async def handle_document(message: Message, state: FSMContext):
-    request_number = active_requests.get(message.from_user.id)
-    if not message.document:
-        await message.answer("Пожалуйста, отправь документ.")
-        return
+app = web.Application()
+app["bot"] = bot
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
 
-    # Скачиваем документ
-    file = await bot.download(message.document)
-    filename = f"{request_number}_{message.document.file_name}"
-
-    # Загружаем в Google таблицу
-    sheet.append_row([str(message.from_user.full_name), request_number, filename])
-
-    await message.answer("Документ получен и сохранён.")
-    await state.clear()
-
-# Запуск
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    import asyncio
-    asyncio.run(dp.start_polling(bot))
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
