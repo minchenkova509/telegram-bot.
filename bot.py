@@ -1,142 +1,163 @@
-import os
-import json
 import logging
-from aiogram import Bot, Dispatcher, F, types
+import os
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.types import Message, CallbackQuery, InputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
 
+from google.oauth2.service_account import Credentials
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
-ADMINS = [769063484]
-DRIVERS = {
-    "Еремин": 111111111,
-    "Уранов": 222222222,
-    "Новиков": 333333333
-}
+# Настройка логгирования
+logging.basicConfig(level=logging.INFO)
 
-# 🔐 Google Sheets credentials
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-creds_raw = os.getenv("GOOGLE_CREDENTIALS_JSON")
-with open("creds.json", "w") as f:
-    json.dump(json.loads(creds_raw), f)
-credentials = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-client = gspread.authorize(credentials)
+# Переменные среды
+ADMINS = ["769063484"]  # Telegram ID админа
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+GOOGLE_CREDS = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+# Проверка переменных
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не задан в переменных среды")
+
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN, default=ParseMode.HTML)
+dp = Dispatcher()
+
+# Google Sheets авторизация
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(eval(GOOGLE_CREDS), scopes=scopes)
+client = gspread.authorize(creds)
 sheet = client.open("Falcontrans Docs").sheet1
 
-# 🚀 Telegram Bot
-bot_token = os.getenv("API_TOKEN")
-bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=MemoryStorage())
+# Память водителей и заявок
+drivers = ["Ерёмин", "Уранов", "Новиков"]
+driver_zayavki = {}
 
-class UploadState(StatesGroup):
-    waiting_photo = State()
-    waiting_number = State()
-    waiting_driver = State()
-
-class DocumentState(StatesGroup):
-    choosing_application = State()
-    sending_documents = State()
-
-applications = {}  # {driver_id: [{"number": "123", "photo": file_id}]}
-current_upload = {}
-
+# Обработка /start
 @dp.message(F.text == "/start")
-async def start_handler(msg: types.Message, state: FSMContext):
-    if msg.from_user.id in ADMINS:
-        await msg.answer("Отправь фото заявки!")
-        await state.set_state(UploadState.waiting_photo)
+async def start(message: Message):
+    if str(message.from_user.id) in ADMINS:
+        await message.answer("👋 Привет, админ! Отправь фото заявки.")
     else:
-        kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text=name)] for name in DRIVERS.keys()],
-            resize_keyboard=True
-        )
-        await msg.answer("Выбери свою фамилию:", reply_markup=kb)
+        builder = InlineKeyboardBuilder()
+        for name in drivers:
+            builder.button(text=name, callback_data=f"driver_{name}")
+        await message.answer("Выбери свою фамилию:", reply_markup=builder.as_markup())
 
-@dp.message(UploadState.waiting_photo, F.photo)
-async def photo_received(msg: types.Message, state: FSMContext):
-    file_id = msg.photo[-1].file_id
-    current_upload[msg.from_user.id] = {"photo": file_id}
-    await msg.answer("Теперь введи номер заявки:")
-    await state.set_state(UploadState.waiting_number)
-
-@dp.message(UploadState.waiting_number)
-async def number_received(msg: types.Message, state: FSMContext):
-    current_upload[msg.from_user.id]["number"] = msg.text
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=name)] for name in DRIVERS.keys()],
-        resize_keyboard=True
-    )
-    await msg.answer("Кому заявка?", reply_markup=kb)
-    await state.set_state(UploadState.waiting_driver)
-
-@dp.message(UploadState.waiting_driver)
-async def driver_chosen(msg: types.Message, state: FSMContext):
-    driver = msg.text
-    data = current_upload.get(msg.from_user.id)
-    if driver not in DRIVERS:
-        await msg.answer("Неверная фамилия. Попробуй ещё раз.")
-        return
-    driver_id = DRIVERS[driver]
-    applications.setdefault(driver_id, []).append(data)
-    await bot.send_photo(chat_id=driver_id, photo=data["photo"], caption=f"Заявка №{data['number']}")
-    await msg.answer("Заявка отправлена водителю ✅")
-    sheet.append_row([data['number'], driver])
-    await state.clear()
-
-@dp.message(F.text.in_(DRIVERS.keys()))
-async def driver_selected(msg: types.Message, state: FSMContext):
-    driver_id = msg.from_user.id
-    if driver_id not in applications or not applications[driver_id]:
-        await msg.answer("Нет активных заявок. Введите номер вручную:")
-        await state.set_state(DocumentState.choosing_application)
+# Обработка фото от админа
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    if str(message.from_user.id) not in ADMINS:
         return
 
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=app["number"])] for app in applications[driver_id]],
-        resize_keyboard=True
-    )
-    await msg.answer("Выбери номер заявки или введи вручную:", reply_markup=kb)
-    await state.set_state(DocumentState.choosing_application)
+    file_id = message.photo[-1].file_id
+    await message.answer("✏️ Напиши номер заявки:")
+    dp["pending_photo"] = file_id
+    dp["admin_id"] = message.from_user.id
 
-@dp.message(DocumentState.choosing_application)
-async def application_chosen(msg: types.Message, state: FSMContext):
-    await state.update_data(selected_number=msg.text)
-    await msg.answer("Отправь документы (фото):")
-    await state.set_state(DocumentState.sending_documents)
+# Получение номера заявки
+@dp.message(F.text.regexp(r"^\d+$"))
+async def handle_zayavka_number(message: Message):
+    if str(message.from_user.id) not in ADMINS or "pending_photo" not in dp:
+        return
 
-@dp.message(DocumentState.sending_documents, F.photo)
-async def docs_received(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
+    number = message.text
+    file_id = dp.pop("pending_photo")
+    builder = InlineKeyboardBuilder()
+    for d in drivers:
+        builder.button(text=d, callback_data=f"assign_{number}_{d}")
+    await message.answer("Кому отправить заявку?", reply_markup=builder.as_markup())
+    dp["pending_zayavka"] = {"file_id": file_id, "number": number}
+
+# Назначение заявки водителю
+@dp.callback_query(F.data.startswith("assign_"))
+async def assign_zayavka(callback: CallbackQuery):
+    _, number, driver = callback.data.split("_")
+    data = dp.pop("pending_zayavka", None)
+    if data:
+        driver_zayavki.setdefault(driver, {})[number] = data["file_id"]
+        await callback.message.answer(f"✅ Заявка {number} отправлена {driver}")
+        # Сохраняем в таблицу
+        sheet.append_row([datetime.now().isoformat(), driver, number])
+    await callback.answer()
+
+# Водитель выбрал себя
+@dp.callback_query(F.data.startswith("driver_"))
+async def driver_menu(callback: CallbackQuery):
+    name = callback.data.split("_")[1]
+    dp[name] = callback.from_user.id  # Связка имени и user_id
+    zayavki = driver_zayavki.get(name, {})
+    if not zayavki:
+        await callback.message.answer("Нет заявок. Введите вручную номер заявки:")
+        dp["manual_driver"] = name
+        return
+
+    builder = InlineKeyboardBuilder()
+    for num in zayavki:
+        builder.button(text=num, callback_data=f"zayavka_{num}_{name}")
+    builder.button(text="Ввести вручную", callback_data=f"manual_{name}")
+    await callback.message.answer("📋 Ваши заявки:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+# Выбор заявки
+@dp.callback_query(F.data.startswith("zayavka_"))
+async def choose_zayavka(callback: CallbackQuery):
+    _, number, driver = callback.data.split("_")
+    await callback.message.answer("📸 Отправь документы по заявке:")
+    dp["current_doc"] = {"number": number, "driver": driver, "user_id": callback.from_user.id}
+    await callback.answer()
+
+# Ввод вручную
+@dp.callback_query(F.data.startswith("manual_"))
+async def manual_zayavka(callback: CallbackQuery):
+    driver = callback.data.split("_")[1]
+    dp["manual_driver"] = driver
+    await callback.message.answer("✏️ Введите номер заявки вручную:")
+    await callback.answer()
+
+# Ввод номера вручную
+@dp.message(F.text)
+async def manual_entry(message: Message):
+    if "manual_driver" in dp:
+        driver = dp.pop("manual_driver")
+        number = message.text.strip()
+        dp["current_doc"] = {"number": number, "driver": driver, "user_id": message.from_user.id}
+        await message.answer("📸 Отправь документы по заявке:")
+
+# Приём документов
+@dp.message(F.document | F.photo)
+async def handle_docs(message: Message):
+    if "current_doc" not in dp:
+        return
+    data = dp.pop("current_doc")
+    number = data["number"]
+    driver = data["driver"]
     admin_id = ADMINS[0]
-    await bot.send_photo(chat_id=admin_id, photo=msg.photo[-1].file_id,
-                         caption=f"📄 Документ по заявке! №{data['selected_number']} от {msg.from_user.full_name}")
-    await msg.answer("Спасибо! Документы отправлены ✅")
-    await state.clear()
+    await message.answer("✅ Спасибо, документы получены!")
 
-@dp.message()
-async def fallback(msg: types.Message):
-    await msg.answer("Напиши /start чтобы начать")
+    # Пересылаем админу
+    caption = f"Документы по заявке {number} от {driver}"
+    if message.document:
+        await bot.send_document(admin_id, message.document.file_id, caption=caption)
+    elif message.photo:
+        await bot.send_photo(admin_id, message.photo[-1].file_id, caption=caption)
 
-# 🌐 Webhook
+# Запуск сервера
 async def on_startup(app):
-    webhook_url = os.getenv("WEBHOOK_URL")
-    await bot.set_webhook(webhook_url)
+    await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app):
     await bot.delete_webhook()
 
 app = web.Application()
-app.router.add_post("/webhook", dp.handler)
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    web.run_app(app, host="0.0.0.0", port=8080)
+    web.run_app(app, port=8080)
