@@ -116,7 +116,7 @@ async def docs_received(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     admin_id = ADMINS[0]
     await bot.send_photo(chat_id=admin_id, photo=msg.photo[-1].file_id,
-                         caption=f"📄 Документ по заявке №{data['selected_number']} от {msg.from_user.full_name}")
+                         caption=f"📄 Документ по заявке! №{data['selected_number']} от {msg.from_user.full_name}")
     await msg.answer("Спасибо! Документы отправлены ✅")
     await state.clear()
 
