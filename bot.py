@@ -26,7 +26,7 @@ async def start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for name in ["Еремин", "Уранов", "Новиков"]:
         kb.button(text=name, callback_data=name)
-    await message.answer("Кто вы?", reply_markup=kb.as_markup())
+    await message.answer("Привет!Представься пожалуйста", reply_markup=kb.as_markup())
     await state.set_state(DocFSM.waiting_for_driver)
 
 @dp.callback_query(DocFSM.waiting_for_driver)
