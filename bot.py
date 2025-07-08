@@ -1,56 +1,67 @@
 import os
-import logging
 import json
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
+import logging
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.webhook.aiohttp_server import setup_application
+from aiogram.enums import ParseMode
+from aiogram.types import Update
+from aiogram.filters import Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 from aiohttp import web
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Логгинг
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Переменные окружения
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+# Получаем переменные окружения
+API_TOKEN = os.getenv("BOT_TOKEN")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_PATH = "/webhook"
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.getenv("PORT", 8080))
 
-if not all([BOT_TOKEN, GOOGLE_CREDENTIALS_JSON, WEBHOOK_URL]):
-    raise RuntimeError("Не заданы переменные окружения!")
+# Проверка токена
+if not API_TOKEN:
+    raise ValueError("Переменная окружения BOT_TOKEN не установлена")
 
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Инициализация бота
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Подключение к Google Sheets
+# Авторизация в Google Sheets
+creds_dict = json.loads(GOOGLE_CREDS_JSON)
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-credentials = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
-gc = gspread.authorize(credentials)
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+client = gspread.authorize(credentials)
 
-@dp.message(commands=["start"])
+# Подключение к таблице
+sheet_url = "https://docs.google.com/spreadsheets/d/1jDxPfl10qTiKrHW9mdvbY9voinMV872IYrs3iHK56Gg"
+spreadsheet = client.open_by_url(sheet_url)
+worksheet = spreadsheet.sheet1  # используем первый лист
+
+# Обработка команды /start
+@dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Бот успешно запущен и подключен к Google Sheets!")
+    user_id = message.from_user.id
+    full_name = message.from_user.full_name
+    username = message.from_user.username or "-"
+    worksheet.append_row([str(user_id), full_name, username])
+    await message.answer("👋 Привет! Ты успешно записан в таблицу!")
 
+# Запуск веб-сервера (webhook handler)
 async def on_startup(app: web.Application):
-    await bot.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
-    logging.info("Webhook установлен")
+    await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
-    logging.info("Webhook удален")
 
-# Создаем веб-приложение
-app = web.Application()
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
-app.router.add_post(WEBHOOK_PATH, dp.webhook_handler(bot))
+def main():
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    setup_application(app, dp)
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
-# Запускаем сервер
 if __name__ == "__main__":
-    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
+    main()
