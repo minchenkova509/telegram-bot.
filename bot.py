@@ -46,7 +46,7 @@ claims = {}
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext):
     if msg.from_user.id in ADMINS:
-        await msg.answer("Отправь фото заявки.")
+        await msg.answer("Отправь фото заявки!")
         await state.set_state(Form.waiting_for_claim_number)
     else:
         kb = InlineKeyboardBuilder()
