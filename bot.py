@@ -57,7 +57,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 @router.message(Form.waiting_for_claim_number, F.photo)
 async def handle_photo(msg: Message, state: FSMContext):
     await state.update_data(photo=msg.photo[-1].file_id)
-    await msg.answer("Введи номер заявки:")
+    await msg.answer("Введи номер заявки!:")
     await state.set_state(Form.waiting_for_driver)
 
 @router.message(Form.waiting_for_driver)
