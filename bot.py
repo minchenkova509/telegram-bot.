@@ -1,151 +1,149 @@
-import logging
 import os
-from aiogram import Bot, Dispatcher, F
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, CallbackQuery, FSInputFile
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, FSInputFile, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import StatesGroup, State
 
-# ENV VARIABLES
+# === CONFIG ===
 API_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+ADMINS = [769063484]  # твой Telegram ID
 
-ADMINS = ["769063484"]
-DRIVERS = ["Ерёмин", "Уранов", "Новиков"]
+# === Инициализация ===
+bot = Bot(token=API_TOKEN, default=Bot.DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-
-# FSM States
-class AdminState(StatesGroup):
+# === FSM ===
+class Form(StatesGroup):
+    choosing_driver = State()
     waiting_photo = State()
-    waiting_number = State()
-    waiting_driver = State()
+    entering_number = State()
+    sending_docs = State()
 
-class DriverState(StatesGroup):
-    waiting_documents = State()
+# === Память заявок ===
+active_requests = {
+    "Ерёмин": [],
+    "Уранов": [],
+    "Новиков": []
+}
 
-# Memory storage
-storage = MemoryStorage()
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=storage)
+photo_storage = {}
 
-# In-memory заявки
-driver_tasks = {}
-
-# Handlers
+# === Команда старт ===
 @dp.message(F.text == "/start")
 async def start(message: Message, state: FSMContext):
-    user_id = str(message.from_user.id)
-    if user_id in ADMINS:
+    if message.from_user.id in ADMINS:
         await message.answer("👋 Привет, админ! Отправь фото заявки.")
-        await state.set_state(AdminState.waiting_photo)
+        await state.set_state(Form.waiting_photo)
     else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=driver, callback_data=f"driver:{driver}")]
-            for driver in DRIVERS
-        ])
-        await message.answer("👋 Выбери свою фамилию:", reply_markup=keyboard)
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add("Ерёмин", "Уранов", "Новиков")
+        await message.answer("Выбери свою фамилию:", reply_markup=kb)
+        await state.set_state(Form.choosing_driver)
 
-@dp.message(AdminState.waiting_photo, F.photo)
-async def admin_get_photo(message: Message, state: FSMContext):
+# === Админ отправляет фото ===
+@dp.message(Form.waiting_photo, F.photo)
+async def admin_photo(message: Message, state: FSMContext):
     file_id = message.photo[-1].file_id
     await state.update_data(photo_id=file_id)
-    await message.answer("📄 Введи номер заявки:")
-    await state.set_state(AdminState.waiting_number)
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("Ерёмин", "Уранов", "Новиков")
+    await message.answer("Кому отправить заявку?", reply_markup=kb)
+    await state.set_state(Form.choosing_driver)
 
-@dp.message(AdminState.waiting_number)
-async def admin_get_number(message: Message, state: FSMContext):
-    await state.update_data(task_number=message.text)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=driver, callback_data=f"assign:{driver}")]
-        for driver in DRIVERS
-    ])
-    await message.answer("👤 Кому отправить заявку?", reply_markup=keyboard)
-    await state.set_state(AdminState.waiting_driver)
-
-@dp.callback_query(F.data.startswith("assign:"))
-async def admin_assign_driver(callback: CallbackQuery, state: FSMContext):
+# === Админ выбирает водителя ===
+@dp.message(Form.choosing_driver, F.text.in_(["Ерёмин", "Уранов", "Новиков"]))
+async def assign_driver(message: Message, state: FSMContext):
+    driver = message.text
     data = await state.get_data()
-    photo_id = data["photo_id"]
-    task_number = data["task_number"]
-    driver = callback.data.split(":")[1]
+    file_id = data.get("photo_id")
 
-    # Сохраняем заявку
-    driver_tasks.setdefault(driver, []).append({
-        "task_number": task_number,
-        "photo_id": photo_id
-    })
+    if not file_id:
+        await message.answer("Сначала отправь фото заявки.")
+        return
 
-    await callback.message.answer(f"✅ Заявка №{task_number} отправлена {driver}!")
+    await message.answer("Введи номер заявки:")
+    await state.update_data(driver=driver)
+    await state.set_state(Form.entering_number)
+
+# === Админ вводит номер заявки ===
+@dp.message(Form.entering_number)
+async def enter_number(message: Message, state: FSMContext):
+    data = await state.get_data()
+    driver = data["driver"]
+    file_id = data["photo_id"]
+    req_number = message.text
+
+    active_requests[driver].append(req_number)
+    photo_storage[req_number] = file_id
+
+    await message.answer(f"✅ Заявка №{req_number} отправлена водителю {driver}")
     await state.clear()
 
-@dp.callback_query(F.data.startswith("driver:"))
-async def driver_selected(callback: CallbackQuery, state: FSMContext):
-    driver = callback.data.split(":")[1]
-    await state.update_data(driver_name=driver)
+# === Водитель выбирает фамилию ===
+@dp.message(Form.choosing_driver, F.text.in_(["Ерёмин", "Уранов", "Новиков"]))
+async def driver_selected(message: Message, state: FSMContext):
+    driver = message.text
+    requests = active_requests.get(driver, [])
 
-    tasks = driver_tasks.get(driver, [])
-    if not tasks:
-        await callback.message.answer("📭 Заявок пока нет.")
+    if not requests:
+        await message.answer("У тебя пока нет активных заявок.")
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=task["task_number"], callback_data=f"task:{task['task_number']}")]
-        for task in tasks
-    ])
-    await callback.message.answer("📌 Мои заявки:", reply_markup=keyboard)
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for req in requests:
+        kb.add(req)
+    kb.add("Ввести вручную")
 
-@dp.callback_query(F.data.startswith("task:"))
-async def driver_selected_task(callback: CallbackQuery, state: FSMContext):
-    task_number = callback.data.split(":")[1]
+    await state.update_data(driver=driver)
+    await message.answer("Выбери номер заявки:", reply_markup=kb)
+    await state.set_state(Form.sending_docs)
+
+# === Водитель отправляет документы по номеру заявки ===
+@dp.message(Form.sending_docs, F.text)
+async def receive_docs(message: Message, state: FSMContext):
+    req_number = message.text
     data = await state.get_data()
-    driver = data.get("driver_name")
 
-    task_list = driver_tasks.get(driver, [])
-    task = next((t for t in task_list if t["task_number"] == task_number), None)
-
-    if not task:
-        await callback.message.answer("❌ Заявка не найдена.")
+    if req_number not in photo_storage and req_number != "Ввести вручную":
+        await message.answer("Такой заявки нет. Введи вручную или выбери из списка.")
         return
 
-    await callback.message.answer_photo(task["photo_id"], caption=f"📄 Заявка №{task_number}")
-    await state.update_data(current_task=task_number)
-    await callback.message.answer("📤 Отправь документы на эту заявку:")
-    await state.set_state(DriverState.waiting_documents)
+    await message.answer(f"Отправь фото документов по заявке {req_number}")
+    await state.update_data(req_number=req_number)
 
-@dp.message(DriverState.waiting_documents, F.photo)
-async def driver_send_docs(message: Message, state: FSMContext):
+# === Водитель отправил фото документов ===
+@dp.message(F.photo)
+async def docs_received(message: Message, state: FSMContext):
     data = await state.get_data()
-    task_number = data.get("current_task")
-    driver = data.get("driver_name")
+    req_number = data.get("req_number", "Без номера")
 
-    # Пересылаем админу
+    caption = f"📄 Документы по заявке {req_number}\nОт: @{message.from_user.username or message.from_user.id}"
     for admin_id in ADMINS:
-        await bot.send_message(admin_id, f"📥 Документы от {driver} по заявке №{task_number}")
-        await bot.send_photo(admin_id, message.photo[-1].file_id)
+        await bot.send_photo(admin_id, message.photo[-1].file_id, caption=caption)
 
-    await message.answer("✅ Спасибо! Документы отправлены.")
+    await message.answer("✅ Документы получены. Спасибо!")
     await state.clear()
 
-# Webhook setup
+# === Webhook setup ===
 async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url != WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app):
     await bot.delete_webhook()
 
-# AIOHTTP
+# === Запуск сервера ===
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
-setup_application(app, dp)
 
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=8080)
