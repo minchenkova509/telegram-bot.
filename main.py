@@ -8,6 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
+from aiogram.client.default import DefaultBotProperties
 
 # === Проверка переменных ===
 API_TOKEN = os.getenv("BOT_TOKEN")
@@ -18,7 +19,10 @@ if not API_TOKEN or not WEBHOOK_URL:
     raise ValueError("❌ BOT_TOKEN и WEBHOOK_URL должны быть заданы в переменных окружения")
 
 # === Инициализация бота ===
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher(storage=MemoryStorage())
 
 # === FSM ===
