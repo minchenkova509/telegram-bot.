@@ -48,8 +48,10 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("👋 Привет, админ! Отправь фото заявки.")
         await state.set_state(Form.waiting_photo)
     else:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("Ерёмин", "Уранов", "Новиков")
+        kb = types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="Ерёмин"), types.KeyboardButton(text="Уранов"), types.KeyboardButton(text="Новиков")]],
+            resize_keyboard=True
+        )
         await message.answer("Выбери свою фамилию:", reply_markup=kb)
         await state.set_state(Form.choosing_driver_driver)
 
@@ -58,8 +60,10 @@ async def cmd_start(message: Message, state: FSMContext):
 async def handle_photo(message: Message, state: FSMContext):
     file_id = message.photo[-1].file_id
     await state.update_data(photo_id=file_id)
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("Ерёмин", "Уранов", "Новиков")
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="Ерёмин"), types.KeyboardButton(text="Уранов"), types.KeyboardButton(text="Новиков")]],
+        resize_keyboard=True
+    )
     await message.answer("Кому отправить заявку?", reply_markup=kb)
     await state.set_state(Form.choosing_driver_admin)
 
@@ -102,10 +106,10 @@ async def driver_select_name(message: Message, state: FSMContext):
         await message.answer("У тебя пока нет активных заявок.")
         return
 
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for req in requests:
-        kb.add(req)
-    kb.add("Ввести вручную")
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=req)] for req in requests] + [[types.KeyboardButton(text="Ввести вручную")]],
+        resize_keyboard=True
+    )
 
     await state.update_data(driver=driver)
     await message.answer("Выбери номер заявки:", reply_markup=kb)
