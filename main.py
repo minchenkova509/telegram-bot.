@@ -18,7 +18,7 @@ if not API_TOKEN or not WEBHOOK_URL:
     raise ValueError("❌ BOT_TOKEN и WEBHOOK_URL должны быть заданы в переменных окружения")
 
 # === Инициализация бота ===
-bot = Bot(token=API_TOKEN, default=Bot.DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 
 # === FSM ===
