@@ -1,130 +1,146 @@
 import logging
-import os
-import json
-import gspread
-from aiogram import Bot, Dispatcher, F, Router
+import asyncio
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.enums import ParseMode
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
-from oauth2client.service_account import ServiceAccountCredentials
 
-# ================== НАСТРОЙКИ ===================
-ADMINS = [769063484]  # ID администратора
-DRIVERS = ["Ерёмин", "Уранов", "Новиков"]
-bot_token = os.getenv("BOT_TOKEN")
-if not bot_token:
-    raise ValueError("BOT_TOKEN environment variable is missing!")
+# --- Настройки ---
+ADMINS = [769063484]
+DRIVERS = ["Еремин", "Уранов", "Новиков"]
+API_TOKEN = "BOT_TOKEN_HERE"
 
-# =============== GOOGLE SHEETS ===================
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-client = gspread.authorize(credentials)
-sheet = client.open("Falcontrans Docs").sheet1
+# --- Переменные ---
+driver_states = {}
+driver_zayavki = {}
+zayavki = {}
 
-# =============== СОСТОЯНИЯ FSM ====================
-class AdminStates(StatesGroup):
-    waiting_for_photo = State()
-    waiting_for_request_number = State()
-    waiting_for_driver = State()
-
-class DriverStates(StatesGroup):
-    choosing_request = State()
-    waiting_for_docs = State()
-
-# =============== НАСТРОЙКА БОТА ===================
+# --- Логика ---
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=bot_token, default=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
-router = Router()
-dp.include_router(router)
+bot = Bot(token=API_TOKEN, default=bot.DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
 
-# =============== СЛОВАРИ ==========================
-zayavki = {}  # ключ: id водителя, значение: список (номер заявки, file_id)
-current_driver_request = {}  # водитель_id: номер заявки
+# --- Обработка /start ---
+@dp.message(F.text == "/start")
+async def start(message: Message):
+    builder = InlineKeyboardBuilder()
+    for driver in DRIVERS:
+        builder.button(text=driver, callback_data=f"select_driver:{driver}")
+    await message.answer("Выберите себя:", reply_markup=builder.as_markup())
 
-# =============== ХЭНДЛЕРЫ =========================
-@router.message(F.text == "/start")
-async def start(message: Message, state: FSMContext):
-    if message.from_user.id in ADMINS:
-        await state.set_state(AdminStates.waiting_for_photo)
-        await message.answer("👋 Привет, админ! Отправь фото заявки.")
-    else:
-        kb = InlineKeyboardBuilder()
-        for name in DRIVERS:
-            kb.button(text=name, callback_data=f"driver:{name}")
-        await message.answer("Пожалуйста, выберите свою фамилию:", reply_markup=kb.as_markup())
-
-@router.message(AdminStates.waiting_for_photo, F.photo)
-async def admin_get_photo(message: Message, state: FSMContext):
-    file_id = message.photo[-1].file_id
-    await state.update_data(photo=file_id)
-    await state.set_state(AdminStates.waiting_for_request_number)
-    await message.answer("Введи номер заявки:")
-
-@router.message(AdminStates.waiting_for_request_number)
-async def admin_get_request_number(message: Message, state: FSMContext):
-    await state.update_data(request_number=message.text)
-    await state.set_state(AdminStates.waiting_for_driver)
-    kb = InlineKeyboardBuilder()
-    for name in DRIVERS:
-        kb.button(text=name, callback_data=f"assign:{name}")
-    await message.answer("Кому н0430значить?", reply_markup=kb.as_markup())
-
-@router.callback_query(F.data.startswith("assign:"))
-async def assign_request(callback: CallbackQuery, state: FSMContext):
+# --- Выбор водителя ---
+@dp.callback_query(F.data.startswith("select_driver:"))
+async def choose_driver(callback: CallbackQuery):
     driver = callback.data.split(":")[1]
-    data = await state.get_data()
-    request_number = data["request_number"]
-    file_id = data["photo"]
-    zayavki.setdefault(driver, []).append((request_number, file_id))
-    sheet.append_row([request_number, driver])
-    await callback.message.answer(f"Заявка {request_number} добавлена для {driver}.")
-    await state.clear()
+    driver_states[callback.from_user.id] = {"name": driver, "stage": "menu"}
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Мои заявки", callback_data="my_zayavki")
+    await callback.message.answer(f"Привет, {driver}!", reply_markup=builder.as_markup())
+    await callback.answer()
 
-@router.callback_query(F.data.startswith("driver:"))
-async def driver_menu(callback: CallbackQuery, state: FSMContext):
-    driver = callback.data.split(":")[1]
-    await state.set_state(DriverStates.choosing_request)
-    await state.update_data(driver=driver)
-    kb = InlineKeyboardBuilder()
-    for req_num, _ in zayavki.get(driver, []):
-        kb.button(text=req_num, callback_data=f"req:{req_num}")
-    kb.button(text="Другой номер", callback_data="req:manual")
-    await callback.message.answer("Выбери номер заявки:", reply_markup=kb.as_markup())
+# --- Просмотр заявок ---
+@dp.callback_query(F.data == "my_zayavki")
+async def show_zayavki(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    name = driver_states.get(user_id, {}).get("name")
+    relevant = driver_zayavki.get(name, [])
 
-@router.callback_query(F.data.startswith("req:"))
-async def handle_request(callback: CallbackQuery, state: FSMContext):
-    req = callback.data.split(":")[1]
-    if req == "manual":
-        await callback.message.answer("Введи номер ручной:")
-        await state.set_state(DriverStates.waiting_for_docs)
+    if not relevant:
+        await callback.message.answer("Нет заявок. Введите вручную: /manual")
         return
-    await state.update_data(request=req)
-    await callback.message.answer(f"Отправь документы для заявки {req}:")
-    await state.set_state(DriverStates.waiting_for_docs)
 
-@router.message(DriverStates.waiting_for_docs, F.photo)
-async def get_docs(message: Message, state: FSMContext):
-    data = await state.get_data()
-    request = data.get("request") or message.text
-    for admin in ADMINS:
-        await bot.send_photo(admin, message.photo[-1].file_id, caption=f"Заявка {request} от {data['driver']}")
-    await message.answer("Спасибо!")
-    await state.clear()
+    builder = InlineKeyboardBuilder()
+    for z in relevant:
+        builder.button(text=z, callback_data=f"select_z:{z}")
+    await callback.message.answer("Выбери заявку:", reply_markup=builder.as_markup())
+    await callback.answer()
 
-# =============== WEBHOOK =========================
-async def on_startup(app):
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if not webhook_url:
-        raise ValueError("WEBHOOK_URL is not set!")
-    await bot.set_webhook(webhook_url + "/webhook")
+# --- Водитель выбирает заявку ---
+@dp.callback_query(F.data.startswith("select_z:"))
+async def pick_z(callback: CallbackQuery):
+    z_number = callback.data.split(":")[1]
+    driver_states[callback.from_user.id]["selected"] = z_number
+    driver_states[callback.from_user.id]["stage"] = "waiting_doc"
+    await callback.message.answer("Отправьте документы по заявке в виде фото")
+    await callback.answer()
 
-async def on_shutdown(app):
+# --- Принимаем документы ---
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    state = driver_states.get(message.from_user.id, {})
+    if state.get("stage") != "waiting_doc":
+        return
+
+    z_number = state.get("selected")
+    name = state.get("name")
+
+    if z_number and name:
+        for admin_id in ADMINS:
+            await bot.send_photo(admin_id, message.photo[-1].file_id,
+                                 caption=f"Документы от {name} по заявке {z_number}")
+        await message.answer("✅ Спасибо, документы отправлены!")
+        driver_states[message.from_user.id]["stage"] = "menu"
+
+# --- Команда /manual ---
+@dp.message(F.text == "/manual")
+async def manual_entry(message: Message):
+    driver_states[message.from_user.id]["stage"] = "manual_wait"
+    await message.answer("Введите номер заявки:")
+
+# --- Получаем номер от водителя ---
+@dp.message(F.text.regexp(r"^\d+$"))
+async def save_manual(message: Message):
+    state = driver_states.get(message.from_user.id, {})
+    if state.get("stage") == "manual_wait":
+        driver_states[message.from_user.id]["selected"] = message.text
+        driver_states[message.from_user.id]["stage"] = "waiting_doc"
+        await message.answer("Теперь отправьте фото документов")
+
+# --- Админ: загрузка заявки ---
+@dp.message(F.photo & F.from_user.id.in_(ADMINS))
+async def admin_zayavka(message: Message):
+    driver_states[message.from_user.id] = {"stage": "await_z_number", "photo": message.photo[-1].file_id}
+    builder = InlineKeyboardBuilder()
+    for d in DRIVERS:
+        builder.button(text=d, callback_data=f"admin_driver:{d}")
+    await message.answer("Кому эта заявка?", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("admin_driver:"))
+async def assign_driver(callback: CallbackQuery):
+    driver = callback.data.split(":")[1]
+    state = driver_states.get(callback.from_user.id)
+    if not state or "photo" not in state:
+        await callback.answer("Ошибка. Нет сохранённого фото.", show_alert=True)
+        return
+
+    driver_states[callback.from_user.id]["assign_to"] = driver
+    driver_states[callback.from_user.id]["stage"] = "await_number"
+    await callback.message.answer("Введите номер заявки:")
+    await callback.answer()
+
+@dp.message(F.text & F.from_user.id.in_(ADMINS))
+async def save_zayavka(message: Message):
+    state = driver_states.get(message.from_user.id)
+    if not state or state.get("stage") != "await_number":
+        return
+
+    number = message.text
+    driver = state.get("assign_to")
+    photo = state.get("photo")
+
+    zayavki[number] = {"photo": photo, "driver": driver}
+    driver_zayavki.setdefault(driver, []).append(number)
+
+    await message.answer(f"✅ Заявка {number} отправлена {driver}")
+    driver_states[message.from_user.id] = {}
+
+# --- Webhook ---
+async def on_startup(_: web.Application):
+    await bot.set_webhook("https://your-webhook-url/webhook")
+
+async def on_shutdown(_: web.Application):
     await bot.delete_webhook()
 
 app = web.Application()
@@ -133,4 +149,4 @@ app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == '__main__':
-    web.run_app(app, port=8080)
+    web.run_app(app, host="0.0.0.0", port=8080)
